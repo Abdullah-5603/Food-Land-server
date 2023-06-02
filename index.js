@@ -1,13 +1,19 @@
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const express = require('express');
 const jwt = require('jsonwebtoken');
+const EventEmitter = require('events');
+const bus = new EventEmitter();
+const stripe = require('stripe')
 require('dotenv').config()
 const cors = require('cors');
+const { default: Stripe } = require('stripe');
 const app = express()
 const port = process.env.PORT || 3000
 
 app.use(cors())
+app.use(express.static("public"))
 app.use(express.json())
+bus.setMaxListeners(15)
 
 
 const verifyJWT = (req, res, next) =>{
@@ -19,7 +25,8 @@ const verifyJWT = (req, res, next) =>{
 
   jwt.verify(token, process.env.ACCESS_TOKEN, (error, decoded)=>{
     if(error){
-      return res.status(401).send({error : true, message : 'Unauthorize Access' })
+      console.log(error)
+      return res.send({error : true, message : 'Unauthorize Access' })
     }
     req.decoded = decoded;
     next()
@@ -48,6 +55,7 @@ async function run() {
     const reviewsCollection = client.db('FoodLand').collection('revewies')
     const cartsCollection = client.db('FoodLand').collection('carts')
     const usersCollection = client.db('FoodLand').collection('users')
+    const paymentCollection = client.db('FoodLand').collection('payment')
 
     app.post('/jwt', (req,res)=>{
       const user = req.body;
@@ -96,7 +104,7 @@ async function run() {
       res.send(result)
     })
 
-    app.patch('/users/admin/:id', async(req, res) =>{
+    app.patch('/users/admin/:id',verifyJWT, async(req, res) =>{
       const id = req.params.id;
       const query = {_id : new ObjectId(id)}
       const updatedDoc = {
@@ -120,6 +128,20 @@ async function run() {
       const result = await menuCollection.find().toArray();
       res.send(result)
     })
+
+    app.post('/menu', async(req, res)=>{
+      const newItem = req.body;
+      const result = await menuCollection.insertOne(newItem)
+      res.send(result)
+    })
+
+    app.delete('/menu/:id', async(req, res)=>{
+      const id = req.params.id
+      const query = {_id : new ObjectId(id)}
+      const result = await menuCollection.deleteOne(query)
+      res.send(result)
+    })
+
     app.get('/reviews', async (req, res) => {
       const result = await reviewsCollection.find().toArray();
       res.send(result)
@@ -139,7 +161,7 @@ async function run() {
     app.get('/carts', verifyJWT, async (req, res) => {
       const email = req.query.email;
       if (!email) {
-        res.send({})
+        res.send([])
       }
 
       const decodedEmail = req.decoded.email;
@@ -162,13 +184,63 @@ async function run() {
       }
     });
 
+    //create payment intent
+    // app.post('/create-payment-intent', verifyJWT, async (req, res) => {
+    //   const price = req.body;
+    //   console.log(price);
+    //   const amount = price * 100;
+    //   const paymentIntent = await stripe.paymentIntents.create({
+    //     amount: amount,
+    //     currency: 'usd',
+    //     payment_method_types: ['card']
+    //   });
+    //   res.send({
+    //     clientSecret: paymentIntent.client_secret
+    //   });
+    // });
+    app.post("/create-payment-intent", async (req, res) => {
+      const { price } = req.body;
+      const amount = Math.round(price * 100);
+      const stripeClient = stripe(process.env.STRIPE_KEY);
+      try {
+        // Create a PaymentIntent with the order amount and currency
+        const paymentIntent = await stripeClient.paymentIntents.create({
+          amount: amount,
+          currency: "usd",
+          automatic_payment_methods: {
+            enabled: true,
+          },
+        });
+    
+        res.send({
+          clientSecret: paymentIntent.client_secret,
+        });
+      } catch (error) {
+        console.log(error);
+        res.status(500).send({ error: "An error occurred while creating the PaymentIntent." });
+      }
+    });
+
+    //payment related api
+
+    app.post('/payment', async(req, res)=>{
+      const payment = req.body;
+      const insertResult  =await paymentCollection.insertOne(payment)
+
+      const query = { _id : {$in : payment.cartItems.map(id => new ObjectId(id))}}
+      const deleteResult = await cartsCollection.deleteMany(query)
+      res.send({insertResult, deleteResult})
+    })
+    
+    
+
     await client.db("admin").command({ ping: 1 });
-    console.log("Pinged your deployment. You successfully connected to MongoDB!");
+    console.log("Pinged your deployment. You successfully connected to MongoDB!")
   } catch (err) {
     console.log(err.message)
   }
 }
-run().catch(console.dir);
+run().catch(console.dir)
 
 
 
